@@ -1,0 +1,486 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Bö-Man</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #05040a; }
+    #game { width: 100%; height: 100%; }
+    .hud { position: absolute; top: 8px; left: 8px; right: 8px; display: flex; justify-content: space-between; color: #f1eaff; font-family: monospace; font-size: 14px; z-index: 3; text-shadow: 0 0 6px #9a6bff; }
+    .btn { position: absolute; bottom: 14px; right: 14px; background: rgba(20,16,40,.85); border: 1px solid #9a6bff; color: #f1eaff; padding: 8px 12px; border-radius: 8px; font-family: monospace; z-index: 3; }
+    .joystick { position: absolute; bottom: 14px; left: 14px; width: 140px; height: 140px; border-radius: 50%; border: 1px solid #9a6bff55; z-index: 3; touch-action: none; }
+    .stick { position:absolute; width:60px; height:60px; left:40px; top:40px; border-radius:50%; background:#9a6bff55; border:1px solid #9a6bffaa; }
+    /* CRT overlay */
+    .crt::after { content:''; position:fixed; inset:0; pointer-events:none; background: repeating-linear-gradient(0deg, rgba(255,255,255,0.04) 0, rgba(255,255,255,0.04) 1px, rgba(0,0,0,0) 2px); mix-blend-mode: overlay; z-index:2; }
+    .glow { box-shadow: 0 0 18px #8a5cff, 0 0 48px rgba(138,92,255,.35) inset; }
+  </style>
+</head>
+<body class="crt">
+  <div class="hud"><div id="score">Bö-Man · Score: 0 · Lives: 3</div><div id="status">Ready!</div></div>
+  <div class="joystick" id="joystick"><div class="stick" id="stick"></div></div>
+  <button class="btn" id="btnMute">🔊</button>
+  <div id="game" class="glow"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.0/dist/phaser.min.js"></script>
+  <script>
+  // ===== Bö-Man (PWA-ready HTML5 prototype using Phaser 3) =====
+  // Features: Random-Patrol enemies, 3 lives, Powerups (Super-Knospe, Zeitlupe, Magnet), Neon-Arcade vibe, CRT overlay, PWA manifest & SW, generated Pixel icon
+
+  const TILE = 16;              // pixel size per tile (retro look)
+  const COLS = 19;              // maze width
+  const ROWS = 23;              // maze height
+
+  const SPEED_PLAYER = 85;
+  const SPEED_ENEMY = 70;
+
+  const POWERUP_DUR = { super: 10000, slow: 6000, magnet: 8000 };
+
+  const config = {
+    type: Phaser.AUTO,
+    parent: 'game',
+    backgroundColor: '#000000',
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH, width: COLS * TILE, height: ROWS * TILE },
+    pixelArt: true,
+    roundPixels: true,
+    physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
+    scene: { preload, create, update }
+  };
+
+  const game = new Phaser.Game(config);
+
+  let player, walls, plants, cursors, enemies, powerups;
+  let score = 0, lives = 3, muted = false, statusEl, scoreEl;
+  let joystick = { dir: null, active:false, startX:0, startY:0, stick:null, root:null };
+  let lastDir = 'left';
+  let state = { frightened: 0, slow: 0, magnet: 0 };
+
+  // 0 empty, 1 wall, 2 plant, 3 powerup placeholder
+  const MAZE = [
+    '1111111111111111111',
+    '1000000002000000001',
+    '1011110111110111101',
+    '1020010203020200021',
+    '1011011110111110111',
+    '1001010000100001011',
+    '1111010111101111011',
+    '1003020100020103021',
+    '1011110111100111101',
+    '1000020003000200021',
+    '1111011110111110111',
+    '1001010000100001001',
+    '1020010203020200021',
+    '1011110111110111101',
+    '1000000100000100001',
+    '1111110111101111111',
+    '1000020002000200001',
+    '1011110111110111101',
+    '1000000100000100001',
+    '1011110111101111101',
+    '1000000002000000001',
+    '1011111110111111101',
+    '1111111111111111111',
+  ];
+
+  function preload(){
+    statusEl = document.getElementById('status');
+    scoreEl = document.getElementById('score');
+
+    // --- Textures (generated runtime, no external files) ---
+    this.textures.generate('wall', { data: [
+      'BBBBBBBBBBBBBBBB',
+      'B............B.',
+      'B.BBBBBBBBBB.B.',
+      'B.B........B.B.',
+      'B.B.BBBBBB.B.B.',
+      'B.B.B....B.B.B.',
+      'B.B.B.BB.B.B.B.',
+      'B.B.B.B..B.B.B.',
+      'B.B.B.BB.B.B.B.',
+      'B.B.B....B.B.B.',
+      'B.B.BBBBBB.B.B.',
+      'B.B........B.B.',
+      'B.BBBBBBBBBB.B.',
+      'B............B.',
+      'BBBBBBBBBBBBBBBB',
+      'BBBBBBBBBBBBBBBB'
+    ], pixelWidth: 1, palette: { B: '#2a2a3a', '.': '#161621' } });
+
+    this.textures.generate('plant', { data:[
+      '..GG..',
+      '.GGGG.',
+      'GGGGGG',
+      '..GG..',
+      '..GG..',
+      '......'
+    ], pixelWidth: 2, palette: { G: '#6de06d', '.': 'rgba(0,0,0,0)' } });
+
+    this.textures.generate('power_super', { data:[
+      '......',
+      '..PP..',
+      '.PPPP.',
+      '.PPPP.',
+      '..PP..',
+      '......'
+    ], pixelWidth: 2, palette: { P: '#ff7ad9', '.':'rgba(0,0,0,0)'} });
+
+    this.textures.generate('power_slow', { data:[
+      '......',
+      '..YY..',
+      '.YYYY.',
+      '.YYYY.',
+      '..YY..',
+      '......'
+    ], pixelWidth: 2, palette: { Y: '#ffd25a', '.':'rgba(0,0,0,0)'} });
+
+    this.textures.generate('power_magnet', { data:[
+      '......',
+      '..BB..',
+      '.BBBB.',
+      '.BBBB.',
+      '..BB..',
+      '......'
+    ], pixelWidth: 2, palette: { B: '#7aa8ff', '.':'rgba(0,0,0,0)'} });
+
+    this.textures.generate('playerOpen', { data:[
+      '........',
+      '..VVVV..',
+      '.VVVVVV.',
+      'VVV..VVV',
+      'VVVVVVVV',
+      '.VVVVVV.',
+      '..VVVV..',
+      '........'
+    ], pixelWidth: 2, palette: { V:'#b36bff', '.':'rgba(0,0,0,0)' } });
+
+    this.textures.generate('playerClosed', { data:[
+      '........',
+      '..VVVV..',
+      '.VVVVVV.',
+      'VVVVVVVV',
+      'VVVVVVVV',
+      '.VVVVVV.',
+      '..VVVV..',
+      '........'
+    ], pixelWidth: 2, palette: { V:'#b36bff', '.':'rgba(0,0,0,0)' } });
+
+    this.textures.generate('enemy', { data:[
+      '........',
+      '..RRRR..',
+      '.RRRRRR.',
+      '.RR..RR.',
+      '.RRRRRR.',
+      '.RRRRRR.',
+      '..RRRR..',
+      '........'
+    ], pixelWidth: 2, palette: { R:'#ff6b8a', '.':'rgba(0,0,0,0)' } });
+
+    this.textures.generate('enemyFright', { data:[
+      '........',
+      '..BBBB..',
+      '.BBBBBB.',
+      '.BB..BB.',
+      '.BBBBBB.',
+      '.BBBBBB.',
+      '..BBBB..',
+      '........'
+    ], pixelWidth: 2, palette: { B:'#5ac8ff', '.':'rgba(0,0,0,0)' } });
+
+    // simple tones will be generated in create()
+  }
+
+  function create(){
+    // sounds
+    createTone(this, 'eat', 520, 0.06);
+    createTone(this, 'start', 220, 0.2);
+    createTone(this, 'win', 880, 0.25);
+    createTone(this, 'hit', 140, 0.25);
+    if (!muted) this.sound.play('start');
+
+    statusEl.textContent = 'Ready!';
+
+    walls = this.physics.add.staticGroup();
+    plants = this.physics.add.staticGroup();
+    powerups = this.physics.add.staticGroup();
+    enemies = this.physics.add.group();
+
+    // build maze
+    for (let r = 0; r < ROWS; r++){
+      for (let c = 0; c < COLS; c++){
+        const ch = MAZE[r][c];
+        const x = c * TILE + TILE/2;
+        const y = r * TILE + TILE/2;
+        if (ch === '1'){
+          const w = walls.create(x, y, 'wall');
+          w.setDisplaySize(TILE, TILE);
+          w.refreshBody();
+        } else if (ch === '2'){
+          const p = plants.create(x, y, 'plant');
+          p.setName('plant');
+        } else if (ch === '3'){
+          // spawn one of the powerups randomly
+          const types = ['power_super','power_slow','power_magnet'];
+          const key = types[Math.floor(Math.random()*types.length)];
+          const pu = powerups.create(x, y, key);
+          pu.kind = key; // remember type
+        }
+      }
+    }
+
+    // player
+    const startPos = findEmptyTile();
+    player = this.physics.add.sprite(startPos.x, startPos.y, 'playerOpen');
+    player.setCollideWorldBounds(true);
+    player.setCircle(8, 0, 0);
+    player.speed = SPEED_PLAYER;
+    player.mouthTimer = 0;
+    player.eyes = this.add.graphics();
+
+    // enemies
+    const enemySpawns = [{x: TILE*9.5, y: TILE*11.5},{x:TILE*9.5,y:TILE*9.5},{x:TILE*9.5,y:TILE*13.5}];
+    enemySpawns.forEach(sp => {
+      const e = this.physics.add.sprite(sp.x, sp.y, 'enemy');
+      e.speed = SPEED_ENEMY;
+      e.dir = randomDir();
+      e.setCircle(8,0,0);
+      enemies.add(e);
+    });
+
+    // collisions
+    this.physics.add.collider(player, walls);
+    this.physics.add.collider(enemies, walls);
+
+    this.physics.add.overlap(player, plants, (pl, plant) => {
+      plant.destroy();
+      score += 10;
+      updateHUD();
+      if (!muted) this.sound.play('eat');
+      if (plants.countActive(true) === 0){
+        statusEl.textContent = 'Level geschafft!';
+        if (!muted) this.sound.play('win');
+      }
+    });
+
+    this.physics.add.overlap(player, powerups, (pl, pu) => {
+      if (pu.kind === 'power_super') { state.frightened = POWERUP_DUR.super; enemies.children.iterate(e=> e && e.setTexture('enemyFright')); statusEl.textContent = 'Super-Knospe!'; }
+      if (pu.kind === 'power_slow') { state.slow = POWERUP_DUR.slow; statusEl.textContent = 'Zeitlupe!'; }
+      if (pu.kind === 'power_magnet') { state.magnet = POWERUP_DUR.magnet; statusEl.textContent = 'Magnet!'; }
+      pu.destroy();
+      updateHUD();
+    });
+
+    this.physics.add.overlap(player, enemies, (pl, e) => {
+      if (state.frightened > 0){
+        // "eat" enemy: respawn
+        e.x = TILE*9.5; e.y = TILE*11.5; e.dir = randomDir();
+        score += 200; updateHUD(); if (!muted) this.sound.play('eat');
+      } else {
+        // lose a life
+        if (!muted) this.sound.play('hit');
+        lives--; updateHUD();
+        statusEl.textContent = lives>0 ? 'Autsch! Weiter…' : 'Game Over';
+        if (lives<=0){ this.scene.pause(); }
+        else { resetPlayer(); }
+      }
+    });
+
+    // input
+    cursors = this.input.keyboard.createCursorKeys();
+    setupJoystick(this);
+
+    // neon ambience via lights
+    this.lights.enable().setAmbientColor(0x8080ff);
+
+    // mute button
+    document.getElementById('btnMute').addEventListener('click', () => {
+      muted = !muted;
+      document.getElementById('btnMute').textContent = muted ? '🔇' : '🔊';
+    });
+  }
+
+  function update(time, delta){
+    const d = delta;
+
+    // timers
+    state.frightened = Math.max(0, state.frightened - d);
+    state.slow = Math.max(0, state.slow - d);
+    state.magnet = Math.max(0, state.magnet - d);
+    if (state.frightened === 0){ enemies.children.iterate(e=> e && e.texture && e.texture.key !== 'enemy' && e.setTexture('enemy')); }
+
+    // player movement
+    const v = player.speed;
+    let vx=0, vy=0;
+    if (cursors.left.isDown || joystick.dir==='left') { vx = -v; lastDir='left'; }
+    else if (cursors.right.isDown || joystick.dir==='right') { vx = v; lastDir='right'; }
+    else if (cursors.up.isDown || joystick.dir==='up') { vy = -v; lastDir='up'; }
+    else if (cursors.down.isDown || joystick.dir==='down') { vy = v; lastDir='down'; }
+    player.body.setVelocity(vx, vy).velocity.normalize().scale(v);
+
+    // mouth animation
+    player.mouthTimer += delta;
+    if (player.mouthTimer > 120){
+      player.setTexture(player.texture.key === 'playerOpen' ? 'playerClosed' : 'playerOpen');
+      player.mouthTimer = 0;
+    }
+
+    // eyes + outline
+    drawEyes();
+
+    // magnet effect
+    if (state.magnet>0){
+      const range = 60;
+      plants.children.iterate(p => {
+        if (!p) return; const dx = player.x - p.x, dy = player.y - p.y; const dist = Math.hypot(dx,dy);
+        if (dist < range){ p.x += dx/dist*0.8; p.y += dy/dist*0.8; p.refreshBody && p.refreshBody(); }
+      });
+    }
+
+    // enemies move
+    enemies.children.iterate(e => {
+      if (!e) return;
+      const speed = state.slow>0 ? e.speed*0.45 : e.speed;
+      const dir = e.dir;
+      const vx = dir==='left'?-speed:dir==='right'?speed:0;
+      const vy = dir==='up'?-speed:dir==='down'?speed:0;
+      e.body.setVelocity(vx, vy).velocity.normalize().scale(speed);
+
+      // at tile center: possibly choose new random direction
+      if (isCenteredOnTile(e)){
+        const options = validDirsAt(e);
+        // prefer not to reverse unless dead end
+        const opposite = {left:'right', right:'left', up:'down', down:'up'}[dir];
+        const filtered = options.length>1 ? options.filter(d=>d!==opposite) : options;
+        e.dir = filtered[Math.floor(Math.random()*filtered.length)] || dir;
+      }
+    });
+  }
+
+  // ===== Helpers =====
+  function drawEyes(){
+    player.eyes.clear();
+    // outline
+    player.eyes.lineStyle(2, 0x000000, 1);
+    player.eyes.strokeCircle(player.x, player.y, 10);
+    // eyes
+    const ex = lastDir==='left'? -3 : lastDir==='right'? 3 : 0;
+    const ey = lastDir==='up'? -3 : lastDir==='down'? 3 : 0;
+    player.eyes.fillStyle(0xffffff, 1);
+    player.eyes.fillCircle(player.x - 3 + ex, player.y - 2 + ey, 2);
+    player.eyes.fillCircle(player.x + 3 + ex, player.y - 2 + ey, 2);
+  }
+
+  function resetPlayer(){
+    const pos = findEmptyTile();
+    player.x = pos.x; player.y = pos.y; player.body.stop();
+  }
+
+  function updateHUD(){
+    scoreEl.textContent = `Bö-Man · Score: ${score} · Lives: ${lives}`;
+  }
+
+  function findEmptyTile(){
+    for (let r = ROWS-2; r >= 1; r--){
+      for (let c = 1; c < COLS-1; c++){
+        if (MAZE[r][c] !== '1'){
+          return { x: c*TILE + TILE/2, y: r*TILE + TILE/2 };
+        }
+      }
+    }
+    return { x: TILE*2, y: TILE*2 };
+  }
+
+  function toGrid(x){ return Math.floor(x / TILE); }
+  function isWallAtColRow(c,r){ if (r<0||r>=ROWS||c<0||c>=COLS) return true; return MAZE[r][c]==='1'; }
+  function isCenteredOnTile(s){
+    const cx = Math.abs((s.x - TILE/2) % TILE);
+    const cy = Math.abs((s.y - TILE/2) % TILE);
+    return cx < 1 && cy < 1;
+  }
+  function validDirsAt(s){
+    const c = toGrid(s.x); const r = toGrid(s.y);
+    const opts = [];
+    if (!isWallAtColRow(c-1,r)) opts.push('left');
+    if (!isWallAtColRow(c+1,r)) opts.push('right');
+    if (!isWallAtColRow(c,r-1)) opts.push('up');
+    if (!isWallAtColRow(c,r+1)) opts.push('down');
+    return opts;
+  }
+  function randomDir(){ return ['left','right','up','down'][Math.floor(Math.random()*4)]; }
+
+  function createTone(scene, key, freq, dur){
+    const rate = 22050;
+    const length = Math.floor(rate * dur);
+    const buffer = scene.game.sound.context.createBuffer(1, length, rate);
+    const data = buffer.getChannelData(0);
+    let phase = 0, inc = (2*Math.PI*freq)/rate;
+    for (let i=0;i<length;i++){ data[i] = Math.sign(Math.sin(phase)) * 0.25; phase += inc; }
+    scene.sound.decodeAudio(key, [buffer]);
+  }
+
+  function setupJoystick(scene){
+    const root = document.getElementById('joystick');
+    const stick = document.getElementById('stick');
+    joystick.root = root; joystick.stick = stick;
+
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+    const start = (cx, cy) => { joystick.active = true; joystick.startX = cx; joystick.startY = cy; };
+    const move = (cx, cy) => {
+      if (!joystick.active) return;
+      const dx = cx - joystick.startX; const dy = cy - joystick.startY;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      const max = 40; const nx = clamp(dx, -max, max); const ny = clamp(dy, -max, max);
+      stick.style.transform = `translate(${nx}px, ${ny}px)`;
+      if (dist > 10){ if (Math.abs(dx) > Math.abs(dy)) joystick.dir = dx>0 ? 'right' : 'left'; else joystick.dir = dy>0 ? 'down' : 'up'; }
+      else joystick.dir = null;
+    };
+    const end = () => { joystick.active = false; joystick.dir = null; stick.style.transform = 'translate(0,0)'; };
+
+    root.addEventListener('pointerdown', e => { e.preventDefault(); start(e.clientX, e.clientY); move(e.clientX, e.clientY); });
+    window.addEventListener('pointermove', e => move(e.clientX, e.clientY));
+    window.addEventListener('pointerup', end);
+  }
+
+  // ===== PWA Manifest & Service Worker (embedded via Blob URLs) =====
+  (function setupPWA(){
+    const link = document.createElement('link'); link.rel = 'manifest';
+    const iconData = generateIconDataURL();
+    const manifest = {
+      name: 'Bö-Man', short_name: 'Bö-Man', start_url: '.', display: 'standalone', background_color: '#05040a', theme_color: '#8a5cff',
+      icons: [
+        { src: iconData, sizes: '192x192', type: 'image/png' },
+        { src: iconData, sizes: '512x512', type: 'image/png' }
+      ]
+    };
+    const blob = new Blob([JSON.stringify(manifest)], {type:'application/json'});
+    link.href = URL.createObjectURL(blob);
+    document.head.appendChild(link);
+
+    const swCode = `self.addEventListener('install', e=>{self.skipWaiting(); e.waitUntil(caches.open('boman-v1').then(c=>c.addAll(['./'])))});
+self.addEventListener('activate', e=>{e.waitUntil(self.clients.claim())});
+self.addEventListener('fetch', e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request)))})`;
+    if ('serviceWorker' in navigator){
+      const swBlob = new Blob([swCode], {type:'text/javascript'});
+      const swUrl = URL.createObjectURL(swBlob);
+      navigator.serviceWorker.register(swUrl);
+    }
+  })();
+
+  // generate a simple pixel Bö-Man head icon
+  function generateIconDataURL(){
+    const c = document.createElement('canvas'); c.width=512; c.height=512; const ctx = c.getContext('2d');
+    // background
+    ctx.fillStyle = '#0b0b12'; ctx.fillRect(0,0,512,512);
+    // head (violet circle-ish)
+    ctx.fillStyle = '#b36bff';
+    ctx.beginPath(); ctx.arc(256,256,180,0,Math.PI*2); ctx.fill();
+    // mouth wedge
+    ctx.fillStyle = '#0b0b12'; ctx.beginPath(); ctx.moveTo(256,256); ctx.arc(256,256,180, -0.25*Math.PI, 0.25*Math.PI, false); ctx.closePath(); ctx.fill();
+    // outline
+    ctx.strokeStyle = '#000000'; ctx.lineWidth = 20; ctx.beginPath(); ctx.arc(256,256,190,0,Math.PI*2); ctx.stroke();
+    // eyes
+    ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(220,220,22,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(292,220,22,0,Math.PI*2); ctx.fill();
+    return c.toDataURL('image/png');
+  }
+  </script>
+</body>
+</html>
